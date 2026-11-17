@@ -511,14 +511,11 @@ function renderRow(c, multiOwner) {
 
   const branches = c.branches && c.branches.length ? c.branches : c.branch ? [c.branch] : [];
   const defaultBranch = c.defaultBranch || "main";
-  const nonDefault = branches.filter((b) => b && b !== defaultBranch);
   let branchHtml = "";
   if (state.branchMode === "all" && branches.length) {
-    const shown = nonDefault[0] || branches[0];
-    if (shown && (shown !== defaultBranch || branches.length > 1)) {
-      const extra = branches.length > 1 ? ` +${branches.length - 1}` : "";
-      branchHtml = `<span class="branch-tag" title="Branches: ${esc(branches.join(", "))}">${esc(shown)}${extra}</span>`;
-    }
+    const shown = branches.includes(defaultBranch) ? defaultBranch : branches[0];
+    const extra = branches.length > 1 ? ` +${branches.length - 1}` : "";
+    branchHtml = `<span class="branch-tag" title="Branches: ${esc(branches.join(", "))}">${esc(shown)}${extra}</span>`;
   }
 
   const prHtml =
