@@ -40,6 +40,17 @@ Keep this file private. It is gitignored, but any web server serving the dashboa
 python3 -m http.server 8000
 ```
 
+## Refresh behavior
+
+Authenticated refreshes re-list active repositories and compare branch head SHAs with the cached snapshot:
+- **Default branch**: unchanged repositories skip commit-history queries.
+- **All branches**: branch heads are checked, then unchanged repositories skip commit-history queries.
+- Changed repositories reload history for the selected time window, replacing cached commits so force-pushes and deleted branches are reflected.
+- Cached commits outside the rolling time window are removed. A wider time window or an older cache without snapshots triggers a full history fetch.
+- On refresh, unchanged history is also reloaded after `cacheTtlMinutes` (15 minutes by default) to update PR details that can change without a push.
+
+Snapshots persist in `localStorage`, so they survive page reloads. Unauthenticated public preview still fetches its data afresh.
+
 ## Shortcuts & URL / Search Qualifiers
 
 - `/` — focus filter (`Esc` clears)

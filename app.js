@@ -671,7 +671,7 @@ query($login: String!, $cursor: String) {
         pushedAt
         isPrivate
         owner { login }
-        defaultBranchRef { name }
+        defaultBranchRef { name target { oid } }
       }
     }
   }
@@ -685,7 +685,7 @@ query($owner: String!, $name: String!) {
     pushedAt
     isPrivate
     owner { login }
-    defaultBranchRef { name }
+    defaultBranchRef { name target { oid } }
   }
 }`;
 
@@ -736,6 +736,7 @@ query($owner: String!, $repo: String!, $cursor: String) {
         name
         target {
           ... on Commit {
+            oid
             committedDate
           }
         }
@@ -898,7 +899,7 @@ async function fetchRepoDefaultBranch(token, repo, sinceIso) {
   return out;
 }
 
-async function fetchRepoAllBranches(token, repo, sinceIso) {
+async function fetchActiveBranches(token, repo, sinceIso) {
   const owner = repo.owner.login;
   const activeBranches = [];
   let bCursor = null;
@@ -919,12 +920,18 @@ async function fetchRepoAllBranches(token, repo, sinceIso) {
         stopBranches = true;
         break;
       }
-      activeBranches.push(node.name);
+      activeBranches.push({ name: node.name, oid: node.target?.oid });
     }
     if (!refs.pageInfo?.hasNextPage || !refs.pageInfo.endCursor) break;
     bCursor = refs.pageInfo.endCursor;
   }
 
+  return activeBranches;
+}
+
+async function fetchRepoAllBranches(token, repo, sinceIso, branches) {
+  const owner = repo.owner.login;
+  const activeBranches = branches.map((b) => b.name);
   // Dedupe commits across branches by oid while tracking all branch names
   const byOid = new Map();
   const defaultBranch = repo.defaultBranchRef?.name || "main";
@@ -978,7 +985,7 @@ async function fetchRepoAllBranches(token, repo, sinceIso) {
   return [...byOid.values()];
 }
 
-async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress) {
+async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress, previous = null) {
   const now = new Date();
   const sinceIso = new Date(now.getTime() - days * 86400_000).toISOString();
   const repoMap = new Map();
@@ -1028,19 +1035,58 @@ async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress)
     }
   }
 
+  // Only reuse a cache for the same scope that covers the entire requested window.
+  const canReuse = previous && !previous.isPublicFallback &&
+    previous.branchMode === branchMode &&
+    canonicalTargetsString(previous.targets?.join(",")).toLowerCase() ===
+      canonicalTargetsString(targets.map((t) => t.raw).join(",")).toLowerCase() &&
+    Date.parse(previous.since) <= Date.parse(sinceIso);
+  const previousByRepo = new Map();
+  if (canReuse) {
+    for (const commit of previous.commits) {
+      const key = commit.fullRepo.toLowerCase();
+      if (!previousByRepo.has(key)) previousByRepo.set(key, []);
+      previousByRepo.get(key).push(commit);
+    }
+  }
+
   const candidateRepos = [...repoMap.values()];
   const commits = [];
+  const repoSnapshots = {};
   const activeRepos = new Set();
   let nextIdx = 0;
   let done = 0;
+  let reused = 0;
 
   async function worker() {
     while (nextIdx < candidateRepos.length) {
       const repo = candidateRepos[nextIdx++];
-      const repoCommits =
-        branchMode === "all"
-          ? await fetchRepoAllBranches(token, repo, sinceIso)
+      const key = `${repo.owner.login}/${repo.name}`.toLowerCase();
+      const branches = branchMode === "all"
+        ? await fetchActiveBranches(token, repo, sinceIso)
+        : [{ name: repo.defaultBranchRef?.name, oid: repo.defaultBranchRef?.target?.oid }];
+      const fingerprint = JSON.stringify({
+        url: repo.url,
+        isPrivate: repo.isPrivate,
+        defaultBranch: repo.defaultBranchRef?.name,
+        heads: branches.map((b) => [b.name, b.oid]).sort((a, b) => a[0].localeCompare(b[0])),
+      });
+      const snapshot = canReuse ? previous.repoSnapshots?.[key] : null;
+      const age = now.getTime() - Date.parse(snapshot?.fetchedAt);
+      const unchanged = branches.every((b) => b.oid) &&
+        snapshot?.fingerprint === fingerprint && age >= 0 && age < CACHE_TTL_MS;
+      let repoCommits;
+      if (unchanged) {
+        repoCommits = previousByRepo.get(key) || [];
+        repoSnapshots[key] = snapshot; // Do not extend the PR-details freshness deadline.
+        reused++;
+      } else {
+        repoCommits = branchMode === "all"
+          ? await fetchRepoAllBranches(token, repo, sinceIso, branches)
           : await fetchRepoDefaultBranch(token, repo, sinceIso);
+        repoSnapshots[key] = { fingerprint, fetchedAt: now.toISOString() };
+      }
+      repoCommits = repoCommits.filter((c) => Date.parse(c.date) >= Date.parse(sinceIso));
 
       if (repoCommits.length) {
         commits.push(...repoCommits);
@@ -1048,7 +1094,7 @@ async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress)
       }
       done++;
       onProgress?.(
-        `Fetching (${branchMode === "all" ? "all branches" : "default branch"}): ${done}/${candidateRepos.length} repos (${commits.length} commits)…`
+        `Fetching (${branchMode === "all" ? "all branches" : "default branch"}): ${done}/${candidateRepos.length} repos (${reused} unchanged, ${commits.length} commits)…`
       );
     }
   }
@@ -1064,6 +1110,7 @@ async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress)
     days,
     reposScanned,
     activeRepoCount: activeRepos.size,
+    repoSnapshots,
     commits,
   };
 }
@@ -1208,7 +1255,7 @@ async function refreshCommits({ statusCb } = {}) {
       const ds = await fetchLiveFromGitHub(token, targets, state.branchMode, fetchDays, (msg) => {
         showBanner(msg);
         statusCb?.(msg);
-      });
+      }, state.dataset || loadCachedDataset());
       state.dataset = prepareDataset(ds);
       saveCachedDataset(ds);
       showBanner("");
