@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>git commits</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <button id="source-btn" class="org-badge" type="button" title="Configure targets &amp; branch scope ( s )">
+        <span id="source-label">nais</span>
+        <span class="badge-caret">▾</span>
+      </button>
+      <span class="sep">/</span>
+      <span class="title">commits</span>
+      <span id="scope-pill" class="scope-pill hidden" title="Fetching all branches">all branches</span>
+      <span id="meta-summary" class="meta-summary">loading…</span>
+    </div>
+
+    <div class="controls">
+      <div class="search-wrap">
+        <input
+          id="search-input"
+          type="search"
+          placeholder="Filter repo:, author:, branch:, pr:, sha, msg… ( / )"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button id="clear-search" class="icon-btn hidden" title="Clear filter (Esc)" type="button">×</button>
+      </div>
+
+      <label class="ctrl">
+        <span>Group</span>
+        <select id="group-select">
+          <option value="none">None</option>
+          <option value="day" selected>Day</option>
+          <option value="repo">Repo</option>
+          <option value="author">Author</option>
+        </select>
+      </label>
+
+      <label class="ctrl">
+        <span>Sort</span>
+        <select id="sort-select">
+          <option value="date-desc" selected>Newest</option>
+          <option value="date-asc">Oldest</option>
+          <option value="repo-asc">Repo A–Z</option>
+          <option value="author-asc">Author A–Z</option>
+          <option value="churn-desc">Lines ±</option>
+          <option value="files-desc">Files</option>
+        </select>
+      </label>
+
+      <label class="ctrl">
+        <span>Window</span>
+        <select id="days-select" title="Time window">
+          <option value="1">24h</option>
+          <option value="3">3d</option>
+          <option value="7" selected>7d</option>
+          <option value="14">14d</option>
+        </select>
+      </label>
+
+      <label class="toggle" title="Hide Renovate, Dependabot, GitHub Actions, etc.">
+        <input id="hide-bots" type="checkbox" checked />
+        <span>No bots</span>
+      </label>
+
+      <label class="toggle" title="Only commits linked to a Pull Request">
+        <input id="only-prs" type="checkbox" />
+        <span>PRs only</span>
+      </label>
+
+      <button id="collapse-btn" class="btn hidden" type="button" title="Collapse/expand all groups">Collapse all</button>
+      <button id="refresh-btn" class="btn" type="button" title="Refresh commits from GitHub ( r )">↻ Refresh</button>
+      <button id="settings-btn" class="btn" type="button" title="Configure targets, branch scope &amp; GitHub token ( s )">Configure</button>
+    </div>
+  </header>
+
+  <dialog id="settings-dialog" class="dialog">
+    <form id="settings-form" method="dialog">
+      <div class="dialog-hd">
+        <strong>Fetch Configuration</strong>
+        <button id="dialog-close" class="icon-btn" type="button">×</button>
+      </div>
+
+      <div class="field">
+        <label for="targets-input" class="field-label">Targets (orgs, users, or <code>owner/repo</code>)</label>
+        <textarea
+          id="targets-input"
+          rows="2"
+          placeholder="nais, sechmann, navikt/naisdevice"
+          spellcheck="false"
+        ></textarea>
+        <div class="field-hint">
+          Comma or newline separated. Orgs and user accounts are auto-detected; specific repos use <code>owner/repo</code>.
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="field-label">Branch scope</span>
+        <div class="radio-row">
+          <label class="radio-opt">
+            <input type="radio" name="branch-mode" value="default" checked />
+            <span><strong>Default branch</strong> (e.g. <code>main</code>)</span>
+          </label>
+          <label class="radio-opt">
+            <input type="radio" name="branch-mode" value="all" />
+            <span><strong>All branches</strong> (deduped by SHA across active branches)</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="token-input" class="field-label">GitHub Token <span class="muted">(optional for public preview, required for GraphQL / private repos)</span></label>
+        <div class="dialog-row">
+          <input id="token-input" type="password" placeholder="gho_... / ghp_... / github_pat_..." autocomplete="off" />
+          <button id="clear-token-btn" class="btn" type="button" title="Clear saved token &amp; cache">Clear token</button>
+        </div>
+        <div class="field-hint">
+          Paste output of <code>gh auth token</code> (saved in cookie + <code>localStorage</code>), or set in <code>config.local.js</code>.
+        </div>
+      </div>
+
+      <div class="dialog-actions">
+        <div id="fetch-status" class="fetch-status"></div>
+        <button id="save-fetch-btn" class="btn primary" type="submit">Save &amp; Fetch</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="status-banner" class="status-banner hidden"></div>
+
+  <main class="table-wrap">
+    <table class="commits-table" id="commits-table">
+      <thead>
+        <tr>
+          <th class="col-time" data-sort="date">Time</th>
+          <th class="col-repo" data-sort="repo">Repo</th>
+          <th class="col-author" data-sort="author">Author</th>
+          <th class="col-sha">SHA</th>
+          <th class="col-pr">PR</th>
+          <th class="col-msg">Message</th>
+          <th class="col-stat" data-sort="churn">± / Files</th>
+        </tr>
+      </thead>
+      <tbody id="commits-tbody"></tbody>
+    </table>
+    <div id="empty-state" class="empty-state hidden"></div>
+  </main>
+
+  <script src="config.local.js" onerror="/* optional gitignored local config */"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
