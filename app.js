@@ -4,6 +4,10 @@ const DEFAULT_TARGETS = String(
 );
 const DEFAULT_BRANCH_MODE = CFG.branchMode === "all" ? "all" : "default";
 const CACHE_TTL_MS = (Number(CFG.cacheTtlMinutes) || 15) * 60_000;
+const AUTO_REFRESH_MS = CFG.autoRefreshSeconds === 0
+  ? 0
+  : Math.max(15, Number(CFG.autoRefreshSeconds) || 60) * 1000;
+const FETCH_OVERLAP_MS = 5 * 60_000;
 
 const TOKEN_COOKIE_KEY = "nais_dash_gh_token";
 const TOKEN_STORAGE_KEY = "nais_dash_gh_token";
@@ -42,6 +46,9 @@ const els = {
 const state = {
   dataset: null,
   isFetching: false,
+  autoRefreshTimer: null,
+  autoRefreshFailures: 0,
+  nextRefreshAt: 0,
   targetsRaw: DEFAULT_TARGETS,
   branchMode: DEFAULT_BRANCH_MODE, // "default" | "all"
   query: "",
@@ -988,12 +995,34 @@ async function fetchRepoAllBranches(token, repo, sinceIso, branches) {
 async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress, previous = null) {
   const now = new Date();
   const sinceIso = new Date(now.getTime() - days * 86400_000).toISOString();
+  const canReuse = previous && !previous.isPublicFallback &&
+    previous.branchMode === branchMode &&
+    canonicalTargetsString(previous.targets?.join(",")).toLowerCase() ===
+      canonicalTargetsString(targets.map((t) => t.raw).join(",")).toLowerCase() &&
+    Date.parse(previous.since) <= Date.parse(sinceIso);
+  const fullSyncAge = now.getTime() - Date.parse(previous?.fullSyncedAt);
+  const lastSuccess = Date.parse(previous?.generatedAt);
+  const incremental = canReuse && fullSyncAge >= 0 && fullSyncAge < CACHE_TTL_MS &&
+    Number.isFinite(lastSuccess) && lastSuccess <= now.getTime();
+  const changesSince = incremental
+    ? new Date(Math.max(Date.parse(sinceIso), lastSuccess - FETCH_OVERLAP_MS)).toISOString()
+    : sinceIso;
+  const commitsByRepo = new Map();
+  const repoSnapshots = incremental ? { ...previous.repoSnapshots } : {};
+  if (incremental) {
+    for (const commit of previous.commits) {
+      if (Date.parse(commit.date) < Date.parse(sinceIso)) continue;
+      const key = commit.fullRepo.toLowerCase();
+      if (!commitsByRepo.has(key)) commitsByRepo.set(key, []);
+      commitsByRepo.get(key).push(commit);
+    }
+  }
   const repoMap = new Map();
   let reposScanned = 0;
 
   for (const target of targets) {
     if (target.kind === "account") {
-      onProgress?.(`Listing active repos for ${target.login}…`);
+      onProgress?.(`Listing ${incremental ? "recently pushed" : "active"} repos for ${target.login}…`);
       let cursor = null;
       let stopEarly = false;
       while (!stopEarly) {
@@ -1007,7 +1036,7 @@ async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress,
         for (const repo of reposConn.nodes || []) {
           if (!repo) continue;
           reposScanned++;
-          if (repo.pushedAt && repo.pushedAt < sinceIso) {
+          if (repo.pushedAt && repo.pushedAt < changesSince) {
             stopEarly = true;
             break;
           }
@@ -1028,32 +1057,14 @@ async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress,
       const repo = data?.repository;
       if (!repo) throw new Error(`Repository '${target.raw}' not found or inaccessible`);
       reposScanned++;
-      if (!repo.pushedAt || repo.pushedAt >= sinceIso) {
+      if (!repo.pushedAt || repo.pushedAt >= changesSince) {
         const key = `${repo.owner.login}/${repo.name}`.toLowerCase();
         repoMap.set(key, repo);
       }
     }
   }
 
-  // Only reuse a cache for the same scope that covers the entire requested window.
-  const canReuse = previous && !previous.isPublicFallback &&
-    previous.branchMode === branchMode &&
-    canonicalTargetsString(previous.targets?.join(",")).toLowerCase() ===
-      canonicalTargetsString(targets.map((t) => t.raw).join(",")).toLowerCase() &&
-    Date.parse(previous.since) <= Date.parse(sinceIso);
-  const previousByRepo = new Map();
-  if (canReuse) {
-    for (const commit of previous.commits) {
-      const key = commit.fullRepo.toLowerCase();
-      if (!previousByRepo.has(key)) previousByRepo.set(key, []);
-      previousByRepo.get(key).push(commit);
-    }
-  }
-
   const candidateRepos = [...repoMap.values()];
-  const commits = [];
-  const repoSnapshots = {};
-  const activeRepos = new Set();
   let nextIdx = 0;
   let done = 0;
   let reused = 0;
@@ -1065,48 +1076,58 @@ async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress,
       const branches = branchMode === "all"
         ? await fetchActiveBranches(token, repo, sinceIso)
         : [{ name: repo.defaultBranchRef?.name, oid: repo.defaultBranchRef?.target?.oid }];
-      const fingerprint = JSON.stringify({
-        url: repo.url,
-        isPrivate: repo.isPrivate,
-        defaultBranch: repo.defaultBranchRef?.name,
-        heads: branches.map((b) => [b.name, b.oid]).sort((a, b) => a[0].localeCompare(b[0])),
-      });
-      const snapshot = canReuse ? previous.repoSnapshots?.[key] : null;
-      const age = now.getTime() - Date.parse(snapshot?.fetchedAt);
-      const unchanged = branches.every((b) => b.oid) &&
-        snapshot?.fingerprint === fingerprint && age >= 0 && age < CACHE_TTL_MS;
-      let repoCommits;
+      const metadata = JSON.stringify([repo.url, repo.isPrivate, repo.defaultBranchRef?.name]);
+      const branchNames = JSON.stringify(branches.map((b) => b.name).sort());
+      const fingerprint = JSON.stringify([
+        metadata,
+        branches.map((b) => [b.name, b.oid]).sort((a, b) => a[0].localeCompare(b[0])),
+      ]);
+      const snapshot = incremental ? previous.repoSnapshots?.[key] : null;
+      const unchanged = branches.every((b) => b.oid) && snapshot?.fingerprint === fingerprint;
       if (unchanged) {
-        repoCommits = previousByRepo.get(key) || [];
-        repoSnapshots[key] = snapshot; // Do not extend the PR-details freshness deadline.
         reused++;
       } else {
-        repoCommits = branchMode === "all"
-          ? await fetchRepoAllBranches(token, repo, sinceIso, branches)
-          : await fetchRepoDefaultBranch(token, repo, sinceIso);
-        repoSnapshots[key] = { fingerprint, fetchedAt: now.toISOString() };
-      }
-      repoCommits = repoCommits.filter((c) => Date.parse(c.date) >= Date.parse(sinceIso));
-
-      if (repoCommits.length) {
-        commits.push(...repoCommits);
-        activeRepos.add(`${repo.owner.login}/${repo.name}`);
+        // New repos, renamed default branches, and added/deleted branches need full history.
+        const recentOnly = snapshot?.metadata === metadata && snapshot?.branchNames === branchNames;
+        const historySince = recentOnly ? changesSince : sinceIso;
+        let repoCommits = branchMode === "all"
+          ? await fetchRepoAllBranches(token, repo, historySince, branches)
+          : await fetchRepoDefaultBranch(token, repo, historySince);
+        if (recentOnly) {
+          const byOid = new Map((commitsByRepo.get(key) || []).map((c) => [c.oid, c]));
+          for (const commit of repoCommits) {
+            const existing = byOid.get(commit.oid);
+            byOid.set(commit.oid, {
+              ...commit,
+              branches: [...new Set([...(existing?.branches || []), ...commit.branches])],
+            });
+          }
+          repoCommits = [...byOid.values()];
+        }
+        commitsByRepo.set(key, repoCommits.filter((c) => Date.parse(c.date) >= Date.parse(sinceIso)));
+        repoSnapshots[key] = { fingerprint, metadata, branchNames };
       }
       done++;
       onProgress?.(
-        `Fetching (${branchMode === "all" ? "all branches" : "default branch"}): ${done}/${candidateRepos.length} repos (${reused} unchanged, ${commits.length} commits)…`
+        `${incremental ? "Recent changes" : "Full reconciliation"}: ${done}/${candidateRepos.length} repos (${reused} unchanged)…`
       );
     }
   }
 
-  await Promise.all(Array.from({ length: Math.min(6, candidateRepos.length) }, worker));
+  // Let all in-flight workers settle before allowing another refresh after a failure.
+  const results = await Promise.allSettled(Array.from({ length: Math.min(6, candidateRepos.length) }, worker));
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed) throw failed.reason;
 
+  const commits = [...commitsByRepo.values()].flat();
+  const activeRepos = new Set(commits.map((c) => c.fullRepo.toLowerCase()));
   commits.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
   return {
     targets: targets.map((t) => t.raw),
     branchMode,
     since: sinceIso,
     generatedAt: now.toISOString(),
+    fullSyncedAt: incremental ? previous.fullSyncedAt : now.toISOString(),
     days,
     reposScanned,
     activeRepoCount: activeRepos.size,
@@ -1235,6 +1256,24 @@ function showBanner(msg) {
   els.statusBanner.classList.remove("hidden");
 }
 
+/* ---------- Automatic refresh (authenticated, visible tabs only) ---------- */
+function scheduleAutoRefresh() {
+  clearTimeout(state.autoRefreshTimer);
+  state.autoRefreshTimer = null;
+  if (!AUTO_REFRESH_MS || document.hidden || !navigator.onLine || !getToken() ||
+      !parseTargets(state.targetsRaw).length) return;
+  if (!state.nextRefreshAt) state.nextRefreshAt = Date.now() + AUTO_REFRESH_MS;
+  state.autoRefreshTimer = setTimeout(() => {
+    if (document.hidden || !navigator.onLine) return;
+    if (state.isFetching || els.settingsDialog.open) {
+      state.nextRefreshAt = Date.now() + AUTO_REFRESH_MS;
+      scheduleAutoRefresh();
+      return;
+    }
+    refreshCommits();
+  }, Math.max(0, state.nextRefreshAt - Date.now()));
+}
+
 async function refreshCommits({ statusCb } = {}) {
   if (state.isFetching) return false;
   const targets = parseTargets(state.targetsRaw);
@@ -1245,6 +1284,8 @@ async function refreshCommits({ statusCb } = {}) {
 
   const token = getToken();
   state.isFetching = true;
+  clearTimeout(state.autoRefreshTimer);
+  let succeeded = false;
   els.refreshBtn.disabled = true;
   els.refreshBtn.textContent = "Fetching…";
   render();
@@ -1270,6 +1311,7 @@ async function refreshCommits({ statusCb } = {}) {
         "Showing unauthenticated public REST preview (default branch only, no ± stats or private repos). Click Configure to create a read-only personal access token."
       );
     }
+    succeeded = true;
     return true;
   } catch (err) {
     const msg = `Fetch failed: ${err.message}`;
@@ -1280,6 +1322,13 @@ async function refreshCommits({ statusCb } = {}) {
     state.isFetching = false;
     els.refreshBtn.disabled = false;
     els.refreshBtn.textContent = "↻ Refresh";
+    state.autoRefreshFailures = succeeded ? 0 : state.autoRefreshFailures + 1;
+    const delay = Math.min(
+      AUTO_REFRESH_MS * 2 ** Math.min(state.autoRefreshFailures, 5),
+      Math.max(AUTO_REFRESH_MS, 15 * 60_000)
+    );
+    state.nextRefreshAt = Date.now() + delay;
+    scheduleAutoRefresh();
     render();
   }
 }
@@ -1316,6 +1365,10 @@ function openSettingsDialog(hint = "") {
 
 /* ---------- Event Listeners ---------- */
 function bindEvents() {
+  document.addEventListener("visibilitychange", scheduleAutoRefresh);
+  window.addEventListener("online", scheduleAutoRefresh);
+  window.addEventListener("offline", scheduleAutoRefresh);
+
   els.searchInput.addEventListener("input", () => {
     state.query = els.searchInput.value;
     els.clearSearch.classList.toggle("hidden", !state.query);
@@ -1446,6 +1499,10 @@ function bindEvents() {
 
   els.settingsForm.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (state.isFetching) {
+      els.fetchStatus.textContent = "A fetch is in progress. Try saving again when it finishes.";
+      return;
+    }
     const newTargets = canonicalTargetsString(els.targetsInput.value);
     if (!newTargets) {
       els.fetchStatus.textContent = "Enter at least one org, user, or owner/repo.";
@@ -1502,7 +1559,8 @@ async function init() {
 
     const ageMs = cached.generatedAt ? Date.now() - Date.parse(cached.generatedAt) : Infinity;
     const needsWiderWindow = state.days > (cached.days || 7);
-    if (ageMs > CACHE_TTL_MS || needsWiderWindow || (token && cached.isPublicFallback)) {
+    const refreshAfter = token && AUTO_REFRESH_MS ? Math.min(AUTO_REFRESH_MS, CACHE_TTL_MS) : CACHE_TTL_MS;
+    if (ageMs > refreshAfter || needsWiderWindow || (token && cached.isPublicFallback)) {
       await refreshCommits();
     }
     return;
@@ -1511,4 +1569,4 @@ async function init() {
   await refreshCommits();
 }
 
-init();
+init().finally(scheduleAutoRefresh);

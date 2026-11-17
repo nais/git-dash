@@ -42,14 +42,17 @@ python3 -m http.server 8000
 
 ## Refresh behavior
 
-Authenticated refreshes re-list active repositories and compare branch head SHAs with the cached snapshot:
-- **Default branch**: unchanged repositories skip commit-history queries.
-- **All branches**: branch heads are checked, then unchanged repositories skip commit-history queries.
-- Changed repositories reload history for the selected time window, replacing cached commits so force-pushes and deleted branches are reflected.
-- Cached commits outside the rolling time window are removed. A wider time window or an older cache without snapshots triggers a full history fetch.
-- On refresh, unchanged history is also reloaded after `cacheTtlMinutes` (15 minutes by default) to update PR details that can change without a push.
+Authenticated dashboards automatically refresh every **60 seconds** while the tab is visible and the browser is online. Polling pauses while configuration is open, never overlaps another fetch, and backs off after failures (up to 15 minutes). Returning to a visible/online tab runs an overdue refresh.
 
-Snapshots persist in `localStorage`, so they survive page reloads. Unauthenticated public preview still fetches its data afresh.
+Between full reconciliations:
+- Repository listings stop once push timestamps are older than the last successful fetch, with a **five-minute overlap**. Older cached repositories are retained.
+- Unchanged branch heads skip commit-history queries. Changed repositories query commits since that same recent cutoff and merge them by repository + SHA.
+- New repositories, changed default branches, and added/deleted branches get a full history fetch immediately when detected.
+- Cached commits outside the rolling time window are removed. Failed fetches leave the last successful snapshot and cutoff unchanged.
+
+Every **15 minutes**, the next refresh reconciles the entire selected time window, replacing cached history and updating PR details. Commit dates are not push dates: backdated commits, force-push removals, and repositories removed from account listings can remain missing or stale until reconciliation. A wider time window or an older cache also triggers a full fetch.
+
+Snapshots persist in `localStorage`, so they survive page reloads. Configure `autoRefreshSeconds` (default `60`, minimum `15`, or `0` to disable) and `cacheTtlMinutes` (default `15`, reconciliation interval) in `config.local.js`. The Refresh button and `r` use the same incremental/reconciliation logic. Unauthenticated public preview remains manual and fetches its data afresh.
 
 ## Shortcuts & URL / Search Qualifiers
 

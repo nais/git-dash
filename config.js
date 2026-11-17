@@ -9,7 +9,8 @@ window.NAIS_DASH_CONFIG = Object.assign(
   {
     targets: "nais",
     branchMode: "default", // "default" | "all"
-    cacheTtlMinutes: 15,
+    cacheTtlMinutes: 15, // Full reconciliation interval.
+    autoRefreshSeconds: 60, // Visible, authenticated tabs only; 0 disables polling.
     token: "",
   },
   window.NAIS_DASH_CONFIG || {}
