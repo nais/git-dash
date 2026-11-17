@@ -9,7 +9,7 @@ Compact, zero-framework HTML/CSS/JS dashboard for viewing recent commits across 
 Click the top-left target badge (e.g. `nais ▾`), click **Configure**, or press `s`:
 - **Targets**: comma/newline-separated orgs, users, or specific repos (e.g. `nais, sechmann, navikt/naisdevice`).
 - **Branch scope**: **Default branch** (`main`/`master`) or **All branches** (scans active branches and dedupes by commit SHA).
-- **GitHub Token**: use **Create read-only PAT ↗** to create a fine-grained personal access token, then paste it (stored in a browser cookie + `localStorage`). The link pre-selects the permissions below and, when all targets share one owner, that resource owner.
+- **GitHub Token**: click **Create read-only token on GitHub ↗** to create a fine-grained personal access token, then paste it (stored in a browser cookie + `localStorage`). The link pre-selects the permissions below and, when all targets share one owner, that resource owner.
 
 [Create a read-only PAT](https://github.com/settings/personal-access-tokens/new?name=git-dash&description=Read-only+commit+dashboard&expires_in=30&contents=read&pull_requests=read) with:
 - **Contents: Read-only** — commit history, branches, and commit statistics.
