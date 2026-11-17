@@ -29,6 +29,7 @@ const els = {
   settingsForm: document.getElementById("settings-form"),
   targetsInput: document.getElementById("targets-input"),
   tokenInput: document.getElementById("token-input"),
+  createTokenLink: document.getElementById("create-token-link"),
   clearTokenBtn: document.getElementById("clear-token-btn"),
   dialogClose: document.getElementById("dialog-close"),
   fetchStatus: document.getElementById("fetch-status"),
@@ -574,7 +575,7 @@ function render() {
     els.emptyState.innerHTML = state.isFetching
       ? `<p>Fetching commits for <strong>${esc(canonicalTargetsString(state.targetsRaw))}</strong>…</p>`
       : `<p><strong>Configure targets &amp; GitHub token to fetch commits.</strong></p>
-         <p>Click <strong>Configure</strong> above (or press <code>s</code>) to pick orgs, users, or <code>owner/repo</code> targets and paste <code>gh auth token</code>.</p>`;
+         <p>Click <strong>Configure</strong> above (or press <code>s</code>) to pick orgs, users, or <code>owner/repo</code> targets and create a read-only personal access token.</p>`;
     return;
   }
 
@@ -1219,7 +1220,7 @@ async function refreshCommits({ statusCb } = {}) {
       state.dataset = prepareDataset(preview);
       saveCachedDataset(preview);
       showBanner(
-        "Showing unauthenticated public REST preview (default branch only, no ± stats or private repos). Click Configure to add `gh auth token`."
+        "Showing unauthenticated public REST preview (default branch only, no ± stats or private repos). Click Configure to create a read-only personal access token."
       );
     }
     return true;
@@ -1236,8 +1237,28 @@ async function refreshCommits({ statusCb } = {}) {
   }
 }
 
+function updateCreateTokenLink() {
+  const url = new URL("https://github.com/settings/personal-access-tokens/new");
+  url.search = new URLSearchParams({
+    name: "git-dash",
+    description: "Read-only commit dashboard",
+    expires_in: "30",
+    contents: "read",
+    pull_requests: "read",
+  }).toString();
+  const owners = new Map(
+    parseTargets(els.targetsInput.value).map((t) => {
+      const owner = t.kind === "repo" ? t.owner : t.login;
+      return [owner.toLowerCase(), owner];
+    })
+  );
+  if (owners.size === 1) url.searchParams.set("target_name", owners.values().next().value);
+  els.createTokenLink.href = url.toString();
+}
+
 function openSettingsDialog(hint = "") {
   els.targetsInput.value = canonicalTargetsString(state.targetsRaw);
+  updateCreateTokenLink();
   const radios = els.settingsForm.querySelectorAll('input[name="branch-mode"]');
   for (const r of radios) r.checked = r.value === state.branchMode;
   els.tokenInput.value = getToken();
@@ -1308,6 +1329,7 @@ function bindEvents() {
 
   els.sourceBtn.addEventListener("click", () => openSettingsDialog());
   els.settingsBtn.addEventListener("click", () => openSettingsDialog());
+  els.targetsInput.addEventListener("input", updateCreateTokenLink);
   els.dialogClose.addEventListener("click", () => els.settingsDialog.close());
 
   els.tbody.addEventListener("click", (e) => {

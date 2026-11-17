@@ -120,7 +120,11 @@
           <button id="clear-token-btn" class="btn" type="button" title="Clear saved token &amp; cache">Clear token</button>
         </div>
         <div class="field-hint">
-          Paste output of <code>gh auth token</code> (saved in cookie + <code>localStorage</code>), or set in <code>config.local.js</code>.
+          <a id="create-token-link" href="https://github.com/settings/personal-access-tokens/new?name=git-dash&amp;description=Read-only+commit+dashboard&amp;expires_in=30&amp;contents=read&amp;pull_requests=read" target="_blank" rel="noopener noreferrer">Create read-only PAT ↗</a>
+          with <strong>Contents: Read-only</strong> and <strong>Pull requests: Read-only</strong> (Metadata is included automatically).
+          Select the resource owner and only the repositories you need; organization approval may be required.
+          One fine-grained PAT covers private repositories under one owner, not multiple owners.
+          Paste the token here (saved in a cookie + <code>localStorage</code>), or set it in <code>config.local.js</code>.
         </div>
       </div>
 
