@@ -6,7 +6,7 @@ const DEFAULT_BRANCH_MODE = CFG.branchMode === "all" ? "all" : "default";
 const CACHE_TTL_MS = (Number(CFG.cacheTtlMinutes) || 15) * 60_000;
 const AUTO_REFRESH_MS = CFG.autoRefreshSeconds === 0
   ? 0
-  : Math.max(15, Number(CFG.autoRefreshSeconds) || 60) * 1000;
+  : Math.max(15, Number(CFG.autoRefreshSeconds) || 30) * 1000;
 const FETCH_OVERLAP_MS = 5 * 60_000;
 
 const TOKEN_COOKIE_KEY = "nais_dash_gh_token";
@@ -989,7 +989,7 @@ async function fetchRepoAllBranches(token, repo, sinceIso, branches) {
   return [...byOid.values()];
 }
 
-async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress, previous = null) {
+async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress, previous = null, forceFull = false) {
   const now = new Date();
   const sinceIso = new Date(now.getTime() - days * 86400_000).toISOString();
   const canReuse = previous && !previous.isPublicFallback &&
@@ -999,7 +999,7 @@ async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress,
     Date.parse(previous.since) <= Date.parse(sinceIso);
   const fullSyncAge = now.getTime() - Date.parse(previous?.fullSyncedAt);
   const lastSuccess = Date.parse(previous?.generatedAt);
-  const incremental = canReuse && fullSyncAge >= 0 && fullSyncAge < CACHE_TTL_MS &&
+  const incremental = !forceFull && canReuse && fullSyncAge >= 0 && fullSyncAge < CACHE_TTL_MS &&
     Number.isFinite(lastSuccess) && lastSuccess <= now.getTime();
   const changesSince = incremental
     ? new Date(Math.max(Date.parse(sinceIso), lastSuccess - FETCH_OVERLAP_MS)).toISOString()
@@ -1074,7 +1074,6 @@ async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress,
         ? await fetchActiveBranches(token, repo, sinceIso)
         : [{ name: repo.defaultBranchRef?.name, oid: repo.defaultBranchRef?.target?.oid }];
       const metadata = JSON.stringify([repo.url, repo.isPrivate, repo.defaultBranchRef?.name]);
-      const branchNames = JSON.stringify(branches.map((b) => b.name).sort());
       const fingerprint = JSON.stringify([
         metadata,
         branches.map((b) => [b.name, b.oid]).sort((a, b) => a[0].localeCompare(b[0])),
@@ -1084,25 +1083,12 @@ async function fetchLiveFromGitHub(token, targets, branchMode, days, onProgress,
       if (unchanged) {
         reused++;
       } else {
-        // New repos, renamed default branches, and added/deleted branches need full history.
-        const recentOnly = snapshot?.metadata === metadata && snapshot?.branchNames === branchNames;
-        const historySince = recentOnly ? changesSince : sinceIso;
-        let repoCommits = branchMode === "all"
-          ? await fetchRepoAllBranches(token, repo, historySince, branches)
-          : await fetchRepoDefaultBranch(token, repo, historySince);
-        if (recentOnly) {
-          const byOid = new Map((commitsByRepo.get(key) || []).map((c) => [c.oid, c]));
-          for (const commit of repoCommits) {
-            const existing = byOid.get(commit.oid);
-            byOid.set(commit.oid, {
-              ...commit,
-              branches: [...new Set([...(existing?.branches || []), ...commit.branches])],
-            });
-          }
-          repoCommits = [...byOid.values()];
-        }
+        // Pushes can contain older commits or remove history, so replace the full window.
+        const repoCommits = branchMode === "all"
+          ? await fetchRepoAllBranches(token, repo, sinceIso, branches)
+          : await fetchRepoDefaultBranch(token, repo, sinceIso);
         commitsByRepo.set(key, repoCommits.filter((c) => Date.parse(c.date) >= Date.parse(sinceIso)));
-        repoSnapshots[key] = { fingerprint, metadata, branchNames };
+        repoSnapshots[key] = { fingerprint };
       }
       done++;
       onProgress?.(
@@ -1271,7 +1257,7 @@ function scheduleAutoRefresh() {
   }, Math.max(0, state.nextRefreshAt - Date.now()));
 }
 
-async function refreshCommits({ statusCb } = {}) {
+async function refreshCommits({ statusCb, forceFull = false } = {}) {
   if (state.isFetching) return false;
   const targets = parseTargets(state.targetsRaw);
   if (!targets.length) {
@@ -1293,7 +1279,7 @@ async function refreshCommits({ statusCb } = {}) {
       const ds = await fetchLiveFromGitHub(token, targets, state.branchMode, fetchDays, (msg) => {
         showBanner(msg);
         statusCb?.(msg);
-      }, state.dataset || loadCachedDataset());
+      }, state.dataset || loadCachedDataset(), forceFull);
       state.dataset = prepareDataset(ds);
       saveCachedDataset(ds);
       showBanner("");
@@ -1421,7 +1407,7 @@ function bindEvents() {
   });
 
   els.refreshBtn.addEventListener("click", () => {
-    refreshCommits();
+    refreshCommits({ forceFull: true });
   });
 
   els.sourceBtn.addEventListener("click", () => openSettingsDialog());
@@ -1472,7 +1458,7 @@ function bindEvents() {
       els.searchInput.select();
     } else if (e.key === "r" && !inInput && !e.metaKey && !e.ctrlKey && !els.settingsDialog.open) {
       e.preventDefault();
-      refreshCommits();
+      refreshCommits({ forceFull: true });
     } else if (e.key === "s" && !inInput && !e.metaKey && !e.ctrlKey && !els.settingsDialog.open) {
       e.preventDefault();
       openSettingsDialog();
